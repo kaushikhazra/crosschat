@@ -98,6 +98,39 @@ Whatever the source, the id is normalized the same way: lowercased, runs of
 non-alphanumerics collapsed to single hyphens, hyphens trimmed. It has to be a
 legal NATS subject token, so a chosen id is not trusted verbatim.
 
+## Who sent this
+
+`source_project_id` is a field the sender fills in, so on its own it is a claim
+rather than a fact. crosschat signs it.
+
+Each project gets an Ed25519 keypair on first `register`. The public half goes
+into its registry entry; the private key stays at
+`~/.crosschat/keys/<id>.key` (override with `CROSSCHAT_KEY_DIR`). `send` signs
+the envelope, `monitor` verifies it against the sender's published key, and
+every delivered message carries a `verification` field:
+
+| value | meaning |
+|---|---|
+| `verified` | signature matches the sender's published key |
+| `unsigned` | no signature — an older or unsigned peer |
+| `no-key` | signed, but the sender publishes no key to check against |
+| `bad-signature` | signature does not match — treat the claimed sender as unproven |
+
+**Messages are marked, never dropped.** What an unverifiable message is worth
+is your session's judgement, and a listener that silently discarded one would
+make that call for you — and would break any mesh that is only partly
+upgraded.
+
+Identity travels with the message, not with the routing, so the same scheme
+survives moving off NATS entirely.
+
+**What this gives you is continuity, not authority.** The registry is
+unauthenticated, so anything that can reach it can publish a key under any id.
+A signature proves the same holder keeps using the same name, and makes a swap
+visible. It does not prove that name was entitled to exist. That is the right
+trade for a mesh whose realistic failure is a project misaddressing itself;
+if you need more, put NATS behind real authentication.
+
 ## Claude Code plugin
 
 This repository is the engine — the Python package and its CLI. The Claude Code

@@ -26,6 +26,8 @@ import nats
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 from nats.js.errors import BadRequestError, NotFoundError
 
+from crosschat import signing
+
 logger = logging.getLogger(__name__)
 
 STREAM_NAME = "CROSSCHAT"
@@ -239,12 +241,27 @@ async def infra_ready(js: Any) -> bool:
 
 
 async def register_project(
-    js: Any, project_id: str, project_name: str, path: str
+    js: Any,
+    project_id: str,
+    project_name: str,
+    path: str,
+    sign: bool = True,
 ) -> None:
     """Write this project's initial crosschat-registry entry.
 
     Raises InfraNotReadyError if crosschat-init hasn't been run yet — does
     not create the infra itself (design.md "crosschat-register" skill).
+
+    When ``sign`` is set, this also creates the project's signing key on first
+    use and publishes the **public** half in the registry entry. The registry
+    is already the discovery mechanism, so key distribution rides on the thing
+    that exists rather than needing anything new. Registration is the only
+    place a key is created: it is the one command that already establishes what
+    a project *is*.
+
+    A project without PyNaCl registers unsigned rather than failing — signing
+    is optional by construction, and a listener that cannot sign must still be
+    reachable.
     """
     if not await infra_ready(js):
         raise InfraNotReadyError(
@@ -258,7 +275,31 @@ async def register_project(
         "registered_at": now,
         "last_heartbeat": now,
     }
+    if sign:
+        try:
+            _, public_key = signing.load_or_create_signing_key(project_id)
+            entry["public_key"] = public_key
+        except signing.SigningUnavailableError:
+            logger.info(
+                "registering %s without a signing key: %s",
+                project_id,
+                "PyNaCl not installed",
+            )
     await kv.put(project_id, json.dumps(entry).encode())
+
+
+async def public_key_for(kv: Any, project_id: str) -> str | None:
+    """Read a project's published public key from the registry, if it has one."""
+    try:
+        entry = await kv.get(project_id)
+    except Exception:
+        return None
+    if entry is None or entry.value is None:
+        return None
+    try:
+        return json.loads(entry.value.decode()).get("public_key")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
 
 
 async def list_active_projects(kv: Any) -> list[dict]:
@@ -335,25 +376,51 @@ async def _refresh_heartbeat_entry(kv: Any, project_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def send_message(js: Any, dest_project_id: str, envelope: dict) -> None:
-    """Publish envelope to project.{dest_project_id} and return immediately.
+async def send_message(
+    js: Any, dest_project_id: str, envelope: dict, sign: bool = True
+) -> None:
+    """Publish envelope to crosschat.{dest_project_id} and return immediately.
 
     No blocking wait, no timeout, ever — the fire-and-forget guarantee that
     closes dryrun-1 C1. Raises DestinationNotRegisteredError if the
     destination has no live registry entry, rather than publishing into a
     channel nobody is registered to read.
+
+    When ``sign`` is set and this project holds a signing key, the envelope is
+    signed before publishing so the receiver can check that
+    ``source_project_id`` is not merely asserted. A project with no key sends
+    unsigned rather than failing — see signing.py on why this stays optional.
     """
     kv = await js.key_value(REGISTRY_BUCKET)
     if not await is_registered(kv, dest_project_id):
         raise DestinationNotRegisteredError(
             f"project '{dest_project_id}' is not currently registered/active"
         )
+    if sign:
+        try:
+            envelope = signing.sign_envelope(envelope, envelope["source_project_id"])
+        except signing.SigningUnavailableError:
+            logger.debug("sending unsigned: PyNaCl not installed")
     await js.publish(project_subject(dest_project_id), json.dumps(envelope).encode())
 
 
 # ---------------------------------------------------------------------------
 # crosschat-monitor — persistent listener
 # ---------------------------------------------------------------------------
+
+
+async def _verify_incoming(kv: Any, data: dict) -> str:
+    """Verification outcome for a received envelope.
+
+    Delivery never depends on the result. A message that cannot be verified is
+    still emitted, carrying the reason — the receiving session decides what an
+    unsigned or unverifiable message is worth, which is a judgement a listener
+    has no business making on its behalf.
+    """
+    source = data.get("source_project_id")
+    if not source:
+        return signing.UNSIGNED
+    return signing.verify_envelope(data, await public_key_for(kv, source))
 
 
 def monitor_consumer_config() -> ConsumerConfig:
@@ -410,6 +477,8 @@ async def monitor_loop(
                     data = json.loads(msg.data.decode())
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     data = {"raw": msg.data.decode(errors="replace")}
+                else:
+                    data["verification"] = await _verify_incoming(kv, data)
                 emit("CROSSCHAT_MESSAGE " + json.dumps(data))
                 await msg.ack()
 

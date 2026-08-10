@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "crosschat"
-version = "0.2.1"
+version = "0.3.0"
 description = "A method for agents to talk to each other — fire-and-forget messaging between Claude Code sessions over NATS."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -21,6 +21,12 @@ classifiers = [
 ]
 dependencies = [
     "nats-py>=2.9.0",
+    # Ed25519 signing. A hard dependency rather than an extra: a project that
+    # cannot sign is indistinguishable on the wire from one that chooses not
+    # to, and attribution that is off by default attributes nothing. The
+    # import is still guarded so a stripped install degrades to unsigned
+    # rather than failing to start.
+    "pynacl>=1.5.0",
 ]
 
 [project.urls]
