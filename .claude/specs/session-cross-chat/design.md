@@ -90,6 +90,44 @@ already-exists. A success report that cannot fail is not a success report.
 Regression test:
 `TestEnsureInfra::test_propagates_subject_overlap_instead_of_reporting_success`.
 
+## Known limitation — the host's notification path truncates (measured 2026-08-10)
+
+**Not a crosschat defect, and worth stating precisely so nobody re-diagnoses
+it.** `monitor_loop` prints the full `CROSSCHAT_MESSAGE <json>` line and
+JetStream carries the full body. In Claude Code, the *Monitor tool's
+notification* — the thing that wakes the live session — is cut at **exactly
+index 500 of the whole line**, envelope included. Not 450, and not on the
+`text` field.
+
+**Measured independently by three separate sessions** (`keylan`, `zedd`,
+`richard`) on 2026-08-10, converging on the same index. Verified formula,
+8 of 8 lines:
+
+```
+prefix   = 76 + len(source_project_id) + len(dest_project_id)
+tail     = 49
+overhead = 125 + id lengths + JSON escape inflation
+```
+
+So usable text is roughly **350–412 characters** depending on id lengths, and
+JSON escaping eats more than it looks: **an em dash costs 6 characters, a
+double quote 2.** Prefer plain ASCII in message bodies.
+
+**A second defect on the same path**: the notification **HTML-escapes**, so a
+`>` sent as-is arrives as `&gt;`. The raw line is unescaped.
+
+**The fix is to read, not to change the contract.** The monitor's raw stdout is
+intact on disk — in Claude Code at
+`…/tasks/<monitor-task-id>.output`. On each wake, read that file for the full
+body. Changing the wake line's format does not help: any format carrying the
+text truncates at the same cap, and dropping the body from the line trades a
+one-step wake for a stateful fetch. **Do not change a wire contract to fix a
+display bug.**
+
+Distinguish *visible* from *parseable* when reasoning about this — they are
+different questions, and conflating them is what produced two different
+"usable text" numbers before the measurements were reconciled.
+
 ## Project ID — canonical definition (closes C3)
 
 **Revision note (2026-08-10, K's call):** the slugified directory name was
