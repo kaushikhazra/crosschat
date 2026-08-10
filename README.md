@@ -83,6 +83,22 @@ every other command takes the id as an argument or reads it from the registry.
 **Your folder naming is your addressing scheme.** Unzip a brain into
 `sb-architect/` and its address is `sb-architect`.
 
+## Claude Code plugin
+
+This repository is the engine — the Python package and its CLI. The Claude Code
+integration (four skills plus a SessionStart hook that registers the project and
+hands the live session its listener command) ships separately as a plugin in the
+`apex-tools` marketplace, so that each piece has exactly one home:
+
+```
+/plugin marketplace add kaushikhazra/apex
+/plugin install crosschat@apex-tools
+```
+
+The plugin shells out to whichever `crosschat` is on PATH, so install this
+package first. If it is missing, the hook says so and the session continues
+normally rather than failing to start.
+
 ## Status
 
 Extracted from an internal fleet tool in August 2026 and renamed. The messaging
