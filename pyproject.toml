@@ -12,10 +12,6 @@ license = { text = "MIT" }
 authors = [{ name = "Kaushik Hazra" }]
 keywords = ["claude", "claude-code", "agents", "nats", "messaging", "multi-agent"]
 
-[project.urls]
-Homepage = "https://github.com/kaushikhazra/crosschat"
-Repository = "https://github.com/kaushikhazra/crosschat"
-Issues = "https://github.com/kaushikhazra/crosschat/issues"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -26,6 +22,11 @@ classifiers = [
 dependencies = [
     "nats-py>=2.9.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/kaushikhazra/crosschat"
+Repository = "https://github.com/kaushikhazra/crosschat"
+Issues = "https://github.com/kaushikhazra/crosschat/issues"
 
 [project.optional-dependencies]
 dev = [
