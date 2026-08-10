@@ -4,13 +4,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "crosschat"
-version = "0.2.0"
+version = "0.2.1"
 description = "A method for agents to talk to each other — fire-and-forget messaging between Claude Code sessions over NATS."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Kaushik Hazra" }]
 keywords = ["claude", "claude-code", "agents", "nats", "messaging", "multi-agent"]
+
+[project.urls]
+Homepage = "https://github.com/kaushikhazra/crosschat"
+Repository = "https://github.com/kaushikhazra/crosschat"
+Issues = "https://github.com/kaushikhazra/crosschat/issues"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
