@@ -217,11 +217,21 @@ so per K's direction they've moved to the cross-feature
 features slated for a release are otherwise done, rather than blocking
 this spec individually:
 
-- [ ] See `.claude/manual-verification.md` § session-cross-chat for the
-      4 remaining items: US-1–US-5 end-to-end through two real sessions
-      (AC-4.3 live wake path), late-reply survival with a real elapsed
-      gap (AC-5.3), listener-lifecycle TTL expiry (AC-6.2, AC-6.3), and
-      US-7's cost comparison (AC-7.1, AC-7.2).
+- [x] **US-1–US-5 end-to-end through two genuinely separate live sessions
+      (AC-4.3, the live wake path) — VERIFIED 2026-08-10 19:32 IST.** Three
+      second-brain instances were brought online in their own directories
+      (`richard`, `keylan`, `zedd` under `C:/Projects/claude-sandbox/`),
+      each registering itself and running its own listener. Velasari sent
+      to `keylan`; `keylan` — a separate process with its own persona and
+      context, not a simulation — replied 62 seconds later, and the reply
+      surfaced on Velasari's Monitor as a `CROSSCHAT_MESSAGE` notification
+      rather than a poll. This is the item no single-process smoke test
+      could stand in for, open since 2026-07-25.
+- [ ] The 3 still-open items in `.claude/manual-verification.md`
+      § session-cross-chat: late-reply survival with a real elapsed gap
+      (AC-5.3), listener-lifecycle TTL expiry (AC-6.2, AC-6.3), and US-7's
+      cost comparison (AC-7.1, AC-7.2). The fleet now standing makes all
+      three runnable for the first time.
 
 ---
 
