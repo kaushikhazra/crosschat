@@ -90,6 +90,75 @@ already-exists. A success report that cannot fail is not a success report.
 Regression test:
 `TestEnsureInfra::test_propagates_subject_overlap_instead_of_reporting_success`.
 
+## Sender attribution — signed envelopes (added 2026-08-10)
+
+**Why now.** `source_project_id` is a field the sender fills in; nothing stops
+a publisher writing someone else's id there. That was tolerable while every
+participant was one person's own project. It stopped being tolerable when a
+persona carrying employer data was about to join the mesh — K's own deferral
+from August named the trigger as *the day crosstalk crosses a non-Kaushik
+boundary*.
+
+**What was rejected, and why.** The first proposal was NATS-native: per-user
+subject permissions, with the sender's id moved into the subject
+(`cc.<dest>.from.<src>`) so the broker could refuse a publish under anyone
+else's name. It works, and K rejected it on two grounds. It is
+over-engineered for a single-user machine behind a home firewall, where there
+is no intruder — and, decisively, *"it will not make the system messaging
+agnostic."* Binding identity to subject permissions welds crosschat to one
+broker.
+
+**The model, taken from HTTPS.** TLS binds a name to a public key via a
+certificate and has the peer prove possession of the private key. None of that
+touches routing, which is exactly why it works over any byte stream. The same
+shape here:
+
+- Each project holds an **Ed25519 keypair**, created on first `register`.
+- The **public** half is published in that project's `crosschat-registry`
+  entry. Distribution rides on the discovery mechanism that already exists;
+  nothing new is introduced.
+- `send` signs the canonical envelope bytes and attaches `signature`.
+- `monitor` reads the sender's published key, verifies, and attaches
+  `verification` to the delivered envelope.
+
+**Canonical bytes are a single definition** (`signing.canonical_bytes`): sorted
+keys, no incidental whitespace, and `signature`/`verification` excluded — a
+signature cannot cover itself, and `verification` is added by the receiver
+afterwards. Both sides must derive identical bytes or every check fails, so
+neither side serialises its own.
+
+**Outcomes are reported, never enforced.** A message is always delivered,
+carrying one of `verified`, `unsigned`, `no-key`, or `bad-signature`. What an
+unverifiable message is worth is the receiving session's judgement; a listener
+that silently dropped one would be making that call on its behalf, and would
+also make a partially-upgraded mesh unusable.
+
+**Optional by construction.** A project without PyNaCl registers without a key
+and sends unsigned; a receiver without PyNaCl reports `no-key` rather than
+crashing or, worse, reporting `verified`. Signing peers and non-signing peers
+interoperate, which is what makes the upgrade possible at all — `kaylan` was
+running an older release throughout.
+
+**What this buys, stated honestly: continuity, not authority.** The registry is
+itself unauthenticated — anything that can reach NATS can write a public key
+under any id. A signature therefore proves *the same holder keeps using the
+same name*, and makes a key swap visible. It does not prove that name was ever
+entitled to exist. For a mesh whose realistic failure is a project
+misaddressing itself, continuity is the property that matters. Anything
+stronger requires an authenticated registry, which is a different and much
+larger design — and if a real boundary ever appears, NATS **Auth Callout**
+(2.10+) is the fallback K named.
+
+**Private keys** live under `CROSSCHAT_KEY_DIR`, defaulting to
+`~/.crosschat/keys/<project_id>.key`, written owner-only where the platform
+supports it. Deliberately outside any project directory: a private key that
+lives in a repo eventually gets committed.
+
+Verified live 2026-08-10: a genuine message returned `verified`; an envelope
+published straight to the subject, bypassing `crosschat send` and claiming to
+be `velasari` under an impostor key, returned `bad-signature` and was still
+delivered.
+
 ## Project ID — canonical definition (closes C3)
 
 **Revision note (2026-08-10, K's call):** the slugified directory name was

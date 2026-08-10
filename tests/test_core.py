@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+from crosschat import signing
 from crosschat.core import (
     DestinationNotRegisteredError,
     InfraNotReadyError,
@@ -385,6 +386,121 @@ class TestRegisterProject:
         with pytest.raises(InfraNotReadyError):
             await register_project(js, "velhari", "Velhari", r"C:\Projects\velhari")
 
+    @pytest.mark.asyncio
+    async def test_publishes_public_key(self, tmp_path, monkeypatch):
+        """Key distribution rides on the registry, which already exists."""
+        monkeypatch.setenv("CROSSCHAT_KEY_DIR", str(tmp_path / "keys"))
+        js = _FakeJS()
+        await register_project(js, "velhari", "Velhari", r"C:\Projects\velhari")
+        entry = json.loads(js._kv.put_calls[0][1])
+        assert len(entry["public_key"]) == 64, (
+            "an Ed25519 public key is 32 bytes of hex"
+        )
+
+    @pytest.mark.asyncio
+    async def test_never_publishes_the_private_key(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CROSSCHAT_KEY_DIR", str(tmp_path / "keys"))
+        js = _FakeJS()
+        await register_project(js, "velhari", "Velhari", r"C:\Projects\velhari")
+        published = js._kv.put_calls[0][1].decode()
+        on_disk = (
+            (tmp_path / "keys" / "velhari.key").read_text(encoding="utf-8").strip()
+        )
+        assert on_disk not in published
+
+    @pytest.mark.asyncio
+    async def test_registers_unsigned_when_signing_unavailable(
+        self, tmp_path, monkeypatch
+    ):
+        """A project that cannot sign must still be reachable."""
+        monkeypatch.setenv("CROSSCHAT_KEY_DIR", str(tmp_path / "keys"))
+
+        def boom(*_args, **_kwargs):
+            raise signing.SigningUnavailableError("no pynacl")
+
+        monkeypatch.setattr(signing, "load_or_create_signing_key", boom)
+        js = _FakeJS()
+        await register_project(js, "velhari", "Velhari", r"C:\Projects\velhari")
+        entry = json.loads(js._kv.put_calls[0][1])
+        assert "public_key" not in entry
+        assert entry["project_name"] == "Velhari"
+
+
+class TestSignedDelivery:
+    """The end-to-end property: a receiver can tell a real sender from a liar."""
+
+    @pytest.mark.asyncio
+    async def test_monitor_marks_a_genuine_message_verified(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("CROSSCHAT_KEY_DIR", str(tmp_path / "keys"))
+        _, public = signing.load_or_create_signing_key("kaylan")
+        envelope = signing.sign_envelope(
+            build_envelope("kaylan", "velasari", "hello"), "kaylan"
+        )
+        kv = _FakeKV({"kaylan": {"project_name": "Kaylan", "public_key": public}})
+        js = _FakeJS(sub=_FakeSub([envelope]), kv=kv)
+        emitted = []
+        await monitor_loop(js, kv, "velasari", emit=emitted.append, max_iterations=1)
+        payload = json.loads(emitted[0][len("CROSSCHAT_MESSAGE ") :])
+        assert payload["verification"] == signing.VERIFIED
+
+    @pytest.mark.asyncio
+    async def test_monitor_flags_an_impersonator(self, tmp_path, monkeypatch):
+        """kaylan signs, relabels itself velhari, and is caught — because the
+        signature is checked against velhari's published key, not its own."""
+        monkeypatch.setenv("CROSSCHAT_KEY_DIR", str(tmp_path / "keys"))
+        signing.load_or_create_signing_key("kaylan")
+        _, velhari_public = signing.load_or_create_signing_key("velhari")
+        forged = signing.sign_envelope(
+            build_envelope("kaylan", "velasari", "trust me"), "kaylan"
+        )
+        forged["source_project_id"] = "velhari"
+        kv = _FakeKV(
+            {"velhari": {"project_name": "Velhari", "public_key": velhari_public}}
+        )
+        js = _FakeJS(sub=_FakeSub([forged]), kv=kv)
+        emitted = []
+        await monitor_loop(js, kv, "velasari", emit=emitted.append, max_iterations=1)
+        payload = json.loads(emitted[0][len("CROSSCHAT_MESSAGE ") :])
+        assert payload["verification"] == signing.BAD_SIGNATURE
+
+    @pytest.mark.asyncio
+    async def test_forged_message_is_still_delivered(self, tmp_path, monkeypatch):
+        """Marked, not dropped. What an unverifiable message is worth is the
+        receiving session's judgement, not the listener's."""
+        monkeypatch.setenv("CROSSCHAT_KEY_DIR", str(tmp_path / "keys"))
+        signing.load_or_create_signing_key("kaylan")
+        _, velhari_public = signing.load_or_create_signing_key("velhari")
+        forged = signing.sign_envelope(
+            build_envelope("kaylan", "velasari", "trust me"), "kaylan"
+        )
+        forged["source_project_id"] = "velhari"
+        kv = _FakeKV(
+            {"velhari": {"project_name": "Velhari", "public_key": velhari_public}}
+        )
+        js = _FakeJS(sub=_FakeSub([forged]), kv=kv)
+        emitted = []
+        await monitor_loop(js, kv, "velasari", emit=emitted.append, max_iterations=1)
+        assert len(emitted) == 1
+        assert json.loads(emitted[0][len("CROSSCHAT_MESSAGE ") :])["text"] == "trust me"
+
+    @pytest.mark.asyncio
+    async def test_sender_without_published_key_reports_no_key(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("CROSSCHAT_KEY_DIR", str(tmp_path / "keys"))
+        signing.load_or_create_signing_key("kaylan")
+        envelope = signing.sign_envelope(
+            build_envelope("kaylan", "velasari", "hi"), "kaylan"
+        )
+        kv = _FakeKV({"kaylan": {"project_name": "Kaylan"}})  # registered, no key
+        js = _FakeJS(sub=_FakeSub([envelope]), kv=kv)
+        emitted = []
+        await monitor_loop(js, kv, "velasari", emit=emitted.append, max_iterations=1)
+        payload = json.loads(emitted[0][len("CROSSCHAT_MESSAGE ") :])
+        assert payload["verification"] == signing.NO_KEY
+
 
 class TestListActiveProjects:
     @pytest.mark.asyncio
@@ -475,7 +591,7 @@ class TestSendMessage:
         kv = _FakeKV({"velasari": {"project_name": "Velasari"}})
         js = _FakeJS(kv=kv)
         envelope = build_envelope("velhari", "velasari", "ping")
-        await send_message(js, "velasari", envelope)
+        await send_message(js, "velasari", envelope, sign=False)
         subject, payload = js.publish_calls[0]
         assert subject == "crosschat.velasari"
         assert json.loads(payload) == envelope
@@ -535,7 +651,9 @@ class TestMonitorLoop:
         assert len(emitted) == 1
         assert emitted[0].startswith("CROSSCHAT_MESSAGE ")
         payload = json.loads(emitted[0][len("CROSSCHAT_MESSAGE ") :])
-        assert payload == msgs[0]
+        # The envelope is passed through untouched, plus a verification verdict.
+        assert {k: v for k, v in payload.items() if k != "verification"} == msgs[0]
+        assert payload["verification"] == "unsigned"
         assert js._sub._queue[0].acked is True
 
     @pytest.mark.asyncio
@@ -548,7 +666,9 @@ class TestMonitorLoop:
         emitted = []
         await monitor_loop(js, kv, "velhari", emit=emitted.append, max_iterations=2)
         payloads = [json.loads(line[len("CROSSCHAT_MESSAGE ") :]) for line in emitted]
-        assert payloads == msgs
+        assert [
+            {k: v for k, v in p.items() if k != "verification"} for p in payloads
+        ] == msgs
 
     @pytest.mark.asyncio
     async def test_timeout_does_not_emit_a_line(self):
