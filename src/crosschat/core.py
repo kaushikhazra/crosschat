@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -67,6 +68,47 @@ def slugify_project_id(path: str) -> str:
     if not slug:
         raise ValueError(f"Cannot derive a project_id from path: {path!r}")
     return slug
+
+
+ID_ENV_VAR = "CROSSCHAT_PROJECT_ID"
+
+
+def normalize_project_id(value: str) -> str:
+    """Slugify an explicitly supplied id, applying the same rules as a path.
+
+    An id chosen by a human still has to be a legal NATS subject token and a
+    legal durable-consumer name, so it goes through the same normalization
+    rather than being trusted verbatim.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    if not slug:
+        raise ValueError(f"Not a usable project_id: {value!r}")
+    return slug
+
+
+def resolve_project_id(
+    path: str, explicit: str | None = None, env: dict | None = None
+) -> str:
+    """Decide a project's id: explicit flag, then environment, then path.
+
+    The path-derived default was the only rule originally, which tied a
+    brain's identity to where it happened to sit on disk — renaming the
+    folder silently renamed the brain, and two brains could not share a
+    directory name. An explicit id is now first-class; the path remains the
+    fallback so existing callers are unaffected.
+
+    The environment variable is what makes this usable from the plugin's
+    SessionStart hook: a per-project ``.claude/settings.json`` can set
+    ``CROSSCHAT_PROJECT_ID`` and the generic hook picks it up without any
+    per-instance edit.
+    """
+    if explicit:
+        return normalize_project_id(explicit)
+    env = os.environ if env is None else env
+    from_env = (env.get(ID_ENV_VAR) or "").strip()
+    if from_env:
+        return normalize_project_id(from_env)
+    return slugify_project_id(path)
 
 
 def project_subject(project_id: str) -> str:

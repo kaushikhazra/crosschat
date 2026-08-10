@@ -24,8 +24,8 @@ from crosschat.core import (
     list_active_projects,
     monitor_loop,
     register_project,
+    resolve_project_id,
     send_message,
-    slugify_project_id,
 )
 
 DEFAULT_NATS_URL = "nats://localhost:4222"
@@ -38,9 +38,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_init = sub.add_parser("init", help="One-time, idempotent cross-talk infra setup")
     p_init.add_argument("nats_url", nargs="?", default=DEFAULT_NATS_URL)
 
-    p_register = sub.add_parser("register", help="Register this project for cross-talk")
+    p_register = sub.add_parser("register", help="Register this project for cross-chat")
     p_register.add_argument("project_path")
     p_register.add_argument("nats_url", nargs="?", default=DEFAULT_NATS_URL)
+    p_register.add_argument(
+        "--id",
+        dest="project_id",
+        default=None,
+        help=(
+            "Address to register under. Defaults to the CROSSCHAT_PROJECT_ID "
+            "environment variable, then to the slugified directory name."
+        ),
+    )
 
     p_send = sub.add_parser("send", help="Fire-and-forget send (also used for replies)")
     p_send.add_argument("source_project_id")
@@ -80,8 +89,10 @@ async def _run_init(nats_url: str) -> None:
         await nc.drain()
 
 
-async def _run_register(project_path: str, nats_url: str) -> None:
-    project_id = slugify_project_id(project_path)
+async def _run_register(
+    project_path: str, nats_url: str, project_id: str | None = None
+) -> None:
+    project_id = resolve_project_id(project_path, explicit=project_id)
     project_name = project_path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
     try:
         nc = await connect_with_retry(nats_url)
@@ -176,7 +187,7 @@ def main() -> None:
     if args.command == "init":
         asyncio.run(_run_init(args.nats_url))
     elif args.command == "register":
-        asyncio.run(_run_register(args.project_path, args.nats_url))
+        asyncio.run(_run_register(args.project_path, args.nats_url, args.project_id))
     elif args.command == "send":
         asyncio.run(
             _run_send(

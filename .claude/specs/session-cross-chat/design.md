@@ -92,17 +92,38 @@ Regression test:
 
 ## Project ID — canonical definition (closes C3)
 
-`project_id` = the **slugified project directory name** (e.g.
-`C:\Projects\velhari` → `velhari`, `C:\Projects\velasari` → `velasari`).
-Lowercase, non-alphanumeric characters replaced with `-`. Simple, stable
-across restarts, human-readable, unique on a single machine — matches
-the v1 assumption (same NATS server / same fleet, one machine).
+**Revision note (2026-08-10, K's call):** the slugified directory name was
+originally the *only* rule. That made a project's address a function of where
+it happened to sit on disk — renaming a folder silently renamed the brain, and
+two brains could never share a directory name anywhere on the machine. With a
+fleet of specialised instances in prospect, K asked for an explicit id
+("I would say register with id"). The path rule survives as a fallback.
 
-`crosschat-register` is the **single authority** that derives
-`project_id` from the project directory path and writes it to the
-registry. No other skill re-derives it — `crosschat-send` and
-`crosschat-monitor` always take `project_id` as an argument or read it
-from the registry/envelope, never recompute it from a path.
+`project_id` is resolved by `resolve_project_id()` in the following
+precedence, and nowhere else:
+
+1. **Explicit** — `crosschat register <path> --id <id>`.
+2. **Environment** — `CROSSCHAT_PROJECT_ID`.
+3. **Path** — the slugified project directory name (e.g. `C:\Projects\velhari`
+   → `velhari`), unchanged from the original rule.
+
+Whatever the source, the value is normalized identically: lowercased, runs of
+non-alphanumeric characters collapsed to single hyphens, leading/trailing
+hyphens stripped. An explicitly supplied id is **not** trusted verbatim — it
+still has to be a legal NATS subject token and a legal durable-consumer name.
+An id that normalizes to nothing raises rather than registering something
+unaddressable.
+
+**Why the environment variable exists** (it is not redundant with the flag):
+the plugin's SessionStart hook is generic and identical for every project, so
+it cannot carry a per-project `--id`. A project's own `.claude/settings.json`
+can set `CROSSCHAT_PROJECT_ID` in its `env` block, and the same unmodified
+hook then registers it under that address. Flag for humans at a terminal,
+environment for unattended registration.
+
+`crosschat register` remains the **single authority** — `crosschat-send` and
+`crosschat-monitor` always take `project_id` as an argument or read it from
+the registry/envelope, and never recompute it from a path.
 
 ## Infra setup — `crosschat-init` (closes dryrun-2 C2)
 

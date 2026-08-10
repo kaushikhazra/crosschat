@@ -76,12 +76,27 @@ All subcommands take an optional trailing NATS URL, defaulting to
 
 ## Project id
 
-The project id is the slugified project directory name — `C:\Projects\velhari`
-becomes `velhari`. `crosschat register` is the only place this is derived;
-every other command takes the id as an argument or reads it from the registry.
+A project's id is its address. `crosschat register` is the only place it is
+decided; every other command takes it as an argument or reads it from the
+registry. Three ways to set it, in precedence order:
 
-**Your folder naming is your addressing scheme.** Unzip a brain into
-`sb-architect/` and its address is `sb-architect`.
+```
+crosschat register /path/to/brain --id sb-architect   # explicit wins
+CROSSCHAT_PROJECT_ID=sb-architect crosschat register /path/to/brain
+crosschat register /path/to/sb-architect              # falls back to folder name
+```
+
+Prefer an explicit id for anything long-lived. The folder-name fallback is
+convenient but ties identity to location: renaming the directory renames the
+brain, and two brains cannot share a directory name.
+
+The environment variable is what makes this work unattended — a project's own
+`.claude/settings.json` can set `CROSSCHAT_PROJECT_ID`, and the generic
+SessionStart hook picks it up with no per-project edit.
+
+Whatever the source, the id is normalized the same way: lowercased, runs of
+non-alphanumerics collapsed to single hyphens, hyphens trimmed. It has to be a
+legal NATS subject token, so a chosen id is not trusted verbatim.
 
 ## Claude Code plugin
 

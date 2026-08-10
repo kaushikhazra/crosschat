@@ -80,13 +80,26 @@ class TestMainDispatch:
     def test_register_dispatches_to_run_register(self, monkeypatch):
         called = {}
 
-        async def fake_run_register(project_path, nats_url):
-            called["args"] = (project_path, nats_url)
+        async def fake_run_register(project_path, nats_url, project_id):
+            called["args"] = (project_path, nats_url, project_id)
 
         monkeypatch.setattr(crosstalk_cli, "_run_register", fake_run_register)
         monkeypatch.setattr(sys, "argv", ["crosschat", "register", "/p"])
         crosstalk_cli.main()
-        assert called["args"] == ("/p", crosstalk_cli.DEFAULT_NATS_URL)
+        assert called["args"] == ("/p", crosstalk_cli.DEFAULT_NATS_URL, None)
+
+    def test_register_passes_explicit_id_through(self, monkeypatch):
+        called = {}
+
+        async def fake_run_register(project_path, nats_url, project_id):
+            called["args"] = (project_path, nats_url, project_id)
+
+        monkeypatch.setattr(crosstalk_cli, "_run_register", fake_run_register)
+        monkeypatch.setattr(
+            sys, "argv", ["crosschat", "register", "/p", "--id", "sb-architect"]
+        )
+        crosstalk_cli.main()
+        assert called["args"] == ("/p", crosstalk_cli.DEFAULT_NATS_URL, "sb-architect")
 
     def test_send_dispatches_to_run_send(self, monkeypatch):
         called = {}

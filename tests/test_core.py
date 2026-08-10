@@ -27,6 +27,7 @@ from crosschat.core import (
     project_subject,
     register_project,
     send_message,
+    resolve_project_id,
     slugify_project_id,
 )
 from nats.js.api import AckPolicy, DeliverPolicy
@@ -180,6 +181,47 @@ class TestSlugifyProjectId:
 
     def test_leading_trailing_hyphens_stripped(self):
         assert slugify_project_id(r"C:\Projects\--velhari--") == "velhari"
+
+
+class TestResolveProjectId:
+    """Explicit id beats environment beats path.
+
+    The path-derived rule was originally the only one, which tied a brain's
+    address to where it sat on disk: renaming the folder renamed the brain,
+    and two brains could not share a directory name anywhere on the machine.
+    """
+
+    def test_explicit_id_wins_over_everything(self):
+        got = resolve_project_id(
+            r"C:\Projects\some-folder",
+            explicit="sb-architect",
+            env={"CROSSCHAT_PROJECT_ID": "from-env"},
+        )
+        assert got == "sb-architect"
+
+    def test_env_var_used_when_no_explicit_id(self):
+        got = resolve_project_id(
+            r"C:\Projects\some-folder", env={"CROSSCHAT_PROJECT_ID": "sb-researcher"}
+        )
+        assert got == "sb-researcher"
+
+    def test_falls_back_to_path_when_neither_given(self):
+        assert resolve_project_id(r"C:\Projects\velhari", env={}) == "velhari"
+
+    def test_blank_env_var_is_ignored(self):
+        got = resolve_project_id(
+            r"C:\Projects\velhari", env={"CROSSCHAT_PROJECT_ID": "   "}
+        )
+        assert got == "velhari"
+
+    def test_explicit_id_is_normalized_not_trusted_verbatim(self):
+        """A human-chosen id still has to be a legal subject token."""
+        got = resolve_project_id(r"C:\Projects\x", explicit="SB Architect!", env={})
+        assert got == "sb-architect"
+
+    def test_unusable_explicit_id_raises(self):
+        with pytest.raises(ValueError):
+            resolve_project_id(r"C:\Projects\x", explicit="!!!", env={})
 
 
 class TestSubjectAndConsumerNames:
