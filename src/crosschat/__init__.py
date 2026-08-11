@@ -4,4 +4,4 @@ Fire-and-forget messaging between Claude Code sessions over NATS, addressed
 at the project level rather than the session level.
 """
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"

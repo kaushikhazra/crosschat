@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "crosschat"
-version = "0.3.1"
+version = "0.3.2"
 description = "A method for agents to talk to each other — fire-and-forget messaging between Claude Code sessions over NATS."
 readme = "README.md"
 requires-python = ">=3.12"
