@@ -16,9 +16,11 @@ broker.
 
 **What this gives you, stated honestly: continuity, not authority.** The
 registry is unauthenticated — anything that can reach it can write a public key
-under any id. So a signature proves *the same holder keeps using the same
-name*, and makes a key swap visible. It does not prove that name was ever
-entitled to exist. For a mesh whose realistic failure is a project
+under any id. So a signature proves *the same key keeps being used under the
+same name*, and makes a key swap visible. It says nothing about who or what
+holds that key — a rebuilt session inherits it from disk and signs
+indistinguishably — and it does not prove that name was ever entitled to exist.
+Continuity of key, not continuity of self. For a mesh whose realistic failure is a project
 misaddressing itself rather than an intruder, continuity is the property that
 actually matters; anything stronger needs an authenticated registry, which is a
 different and much larger design.

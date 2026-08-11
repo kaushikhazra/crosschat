@@ -126,8 +126,11 @@ survives moving off NATS entirely.
 
 **What this gives you is continuity, not authority.** The registry is
 unauthenticated, so anything that can reach it can publish a key under any id.
-A signature proves the same holder keeps using the same name, and makes a swap
-visible. It does not prove that name was entitled to exist. That is the right
+A signature proves the same *key* keeps being used under the same name, and
+makes a swap visible. It says nothing about who or what holds that key — a
+rebuilt session inherits it from disk and signs indistinguishably — and it does
+not prove that name was entitled to exist. Continuity of key, not continuity of
+self. That is the right
 trade for a mesh whose realistic failure is a project misaddressing itself;
 if you need more, put NATS behind real authentication.
 
