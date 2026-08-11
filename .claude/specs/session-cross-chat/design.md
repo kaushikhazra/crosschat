@@ -141,9 +141,11 @@ running an older release throughout.
 
 **What this buys, stated honestly: continuity, not authority.** The registry is
 itself unauthenticated — anything that can reach NATS can write a public key
-under any id. A signature therefore proves *the same holder keeps using the
-same name*, and makes a key swap visible. It does not prove that name was ever
-entitled to exist. For a mesh whose realistic failure is a project
+under any id. A signature therefore proves *the same key keeps being used under
+the same name*, and makes a key swap visible. It says nothing about who or what
+holds that key — a rebuilt session inherits it from disk and signs
+indistinguishably — and it does not prove that name was ever entitled to exist.
+Continuity of key, not continuity of self. For a mesh whose realistic failure is a project
 misaddressing itself, continuity is the property that matters. Anything
 stronger requires an authenticated registry, which is a different and much
 larger design — and if a real boundary ever appears, NATS **Auth Callout**
