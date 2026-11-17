@@ -273,7 +273,8 @@ class TestConnectWithRetry:
         assert calls[0]["allow_reconnect"] is True
 
     @pytest.mark.asyncio
-    async def test_retries_then_succeeds(self):
+    async def test_retries_then_succeeds(self, monkeypatch):
+        monkeypatch.setattr("crosschat.core.CONNECT_BACKOFF", (0.001,))
         attempts = {"n": 0}
 
         async def flaky_connect(**kwargs):
@@ -289,12 +290,51 @@ class TestConnectWithRetry:
         assert attempts["n"] == 3
 
     @pytest.mark.asyncio
-    async def test_raises_connection_error_after_timeout(self):
+    async def test_raises_connection_error_after_timeout(self, monkeypatch):
+        monkeypatch.setattr("crosschat.core.CONNECT_BACKOFF", (0.001,))
+
         async def always_fails(**kwargs):
             raise RuntimeError("nats down")
 
         with pytest.raises(ConnectionError):
             await connect_with_retry("nats://x", timeout=0.01, connect_fn=always_fails)
+
+    @pytest.mark.asyncio
+    async def test_a_wedged_attempt_is_cut_off_and_retried_fresh(self, monkeypatch):
+        # nats.py's own first-connect loop can hang for good; each attempt is bounded.
+        monkeypatch.setattr("crosschat.core.CONNECT_BACKOFF", (0.001,))
+        attempts = {"n": 0}
+
+        async def wedges_once(**kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                await asyncio.sleep(3600)
+            return "CONNECTED"
+
+        result = await connect_with_retry(
+            "nats://x", timeout=None, connect_fn=wedges_once, attempt_timeout=0.05
+        )
+        assert result == "CONNECTED"
+        assert attempts["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_backs_off_5_10_20_40_60_then_holds_at_60(self, monkeypatch):
+        slept: list[float] = []
+
+        async def fake_sleep(seconds):
+            slept.append(seconds)
+
+        monkeypatch.setattr("crosschat.core.asyncio.sleep", fake_sleep)
+        attempts = {"n": 0}
+
+        async def fails_seven_times(**kwargs):
+            attempts["n"] += 1
+            if attempts["n"] <= 7:
+                raise RuntimeError("down")
+            return "CONNECTED"
+
+        await connect_with_retry("nats://x", timeout=None, connect_fn=fails_seven_times)
+        assert slept == [5, 10, 20, 40, 60, 60, 60]
 
 
 # ---------------------------------------------------------------------------
@@ -738,16 +778,107 @@ class TestMonitorLoop:
 
         js = _FakeJS(sub=sub)
         kv = _RaisingKV()
+
+        def boom(_line):
+            raise RuntimeError("emit failed")
+
         with pytest.raises(RuntimeError):
             await monitor_loop(
                 js,
                 kv,
                 "velhari",
-                emit=lambda _: None,
+                emit=boom,
                 max_iterations=1,
                 heartbeat_interval=0,
             )
         assert sub.unsubscribed is True
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_failure_does_not_stop_the_loop_and_is_retried(self):
+        # issue #3: a KV put that raises during a NATS outage must not end the listener.
+        class _RaisingKV(_FakeKV):
+            attempts = 0
+
+            async def put(self, key, value):
+                _RaisingKV.attempts += 1
+                raise RuntimeError("nats timeout")
+
+        sub = _FakeSub([])
+        await monitor_loop(
+            _FakeJS(sub=sub),
+            _RaisingKV(),
+            "velhari",
+            emit=lambda _: None,
+            max_iterations=3,
+            heartbeat_interval=0,
+            message_timeout=0.001,
+        )
+        assert _RaisingKV.attempts == 3  # retried every tick, never gave up
+        assert sub.unsubscribed is True
+
+    @pytest.mark.asyncio
+    async def test_next_msg_error_does_not_stop_the_loop(self):
+        class _DownSub(_FakeSub):
+            calls = 0
+
+            async def next_msg(self, timeout: float = 5.0):
+                _DownSub.calls += 1
+                raise ConnectionError("reconnecting")
+
+        sub = _DownSub([])
+        await monitor_loop(
+            _FakeJS(sub=sub),
+            _FakeKV(),
+            "velhari",
+            emit=lambda _: None,
+            max_iterations=3,
+            heartbeat_interval=3600,
+            message_timeout=0.001,
+        )
+        assert _DownSub.calls == 3
+
+    @pytest.mark.asyncio
+    async def test_ack_failure_does_not_stop_the_loop(self):
+        sub = _FakeSub([{"text": "a"}, {"text": "b"}])
+
+        async def bad_ack():
+            raise ConnectionError("down")
+
+        for m in sub._queue:
+            m.ack = bad_ack
+        emitted: list[str] = []
+        await monitor_loop(
+            _FakeJS(sub=sub),
+            _FakeKV(),
+            "velhari",
+            emit=emitted.append,
+            max_iterations=2,
+            heartbeat_interval=3600,
+            message_timeout=0.001,
+        )
+        assert len(emitted) == 2
+
+    @pytest.mark.asyncio
+    async def test_on_ready_fires_once_after_subscribing(self):
+        order: list[str] = []
+        js = _FakeJS(sub=_FakeSub([]))
+        orig = js.subscribe
+
+        async def spy(*a, **k):
+            order.append("subscribe")
+            return await orig(*a, **k)
+
+        js.subscribe = spy
+        await monitor_loop(
+            js,
+            _FakeKV(),
+            "velhari",
+            emit=lambda _: None,
+            max_iterations=2,
+            message_timeout=0.001,
+            on_ready=lambda: order.append("ready"),
+        )
+        assert order == ["subscribe", "ready"]
 
     @pytest.mark.asyncio
     async def test_handles_malformed_message_json(self):
