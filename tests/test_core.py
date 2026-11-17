@@ -56,7 +56,9 @@ class _FakeKV:
 
     async def get(self, key: str) -> _FakeKVEntry:
         if key not in self._store:
-            raise KeyError(key)
+            from nats.js.errors import KeyNotFoundError
+
+            raise KeyNotFoundError()  # what nats-py raises for a missing key
         return _FakeKVEntry(self._store[key])
 
     async def put(self, key: str, value: bytes) -> None:
@@ -806,7 +808,7 @@ class TestMonitorLoop:
         sub = _FakeSub([])
         await monitor_loop(
             _FakeJS(sub=sub),
-            _RaisingKV(),
+            _RaisingKV({"velhari": {"project_name": "V"}}),
             "velhari",
             emit=lambda _: None,
             max_iterations=3,
@@ -900,3 +902,103 @@ class TestMonitorLoop:
         assert len(emitted) == 1
         assert '"raw": "not json"' in emitted[0]
         assert bad_msg.acked is True
+
+
+class _FlakyKV(_FakeKV):
+    """KV whose first ``fail_reads`` gets raise ``error``; every put is recorded."""
+
+    def __init__(self, initial, fail_reads: int, error: Exception | None = None):
+        super().__init__(initial)
+        self.fail_reads = fail_reads
+        self.error = error or TimeoutError("nats timeout")
+        self.get_calls = 0
+
+    async def get(self, key: str):
+        self.get_calls += 1
+        if self.get_calls <= self.fail_reads:
+            raise self.error
+        return await super().get(key)
+
+
+_SIGNED = {
+    "project_name": "Velhari",
+    "path": "C:/p/velhari",
+    "registered_at": "2026-11-01T00:00:00+00:00",
+    "last_heartbeat": "2026-11-01T00:00:00+00:00",
+    "public_key": "PUBKEY",
+}
+
+
+class TestRefreshHeartbeatEntry:
+    """Issue #2: a failed read must never turn into a wiped entry."""
+
+    @pytest.mark.asyncio
+    async def test_blip_then_success_keeps_public_key_and_other_fields(self):
+        from crosschat.core import _refresh_heartbeat_entry
+
+        kv = _FlakyKV({"velhari": _SIGNED}, fail_reads=2)
+        await _refresh_heartbeat_entry(kv, "velhari", attempts=3, delay=0)
+        assert len(kv.put_calls) == 1
+        entry = json.loads(kv.put_calls[0][1])
+        for field in ("project_name", "path", "registered_at", "public_key"):
+            assert entry[field] == _SIGNED[field]
+        assert entry["last_heartbeat"] != _SIGNED["last_heartbeat"]
+
+    @pytest.mark.asyncio
+    async def test_reads_up_to_three_times_then_writes_nothing(self):
+        from crosschat.core import _refresh_heartbeat_entry
+
+        kv = _FlakyKV({"velhari": _SIGNED}, fail_reads=99)
+        await _refresh_heartbeat_entry(kv, "velhari", attempts=3, delay=0)
+        assert kv.get_calls == 3
+        assert kv.put_calls == []
+
+    @pytest.mark.asyncio
+    async def test_waits_between_tries(self, monkeypatch):
+        from crosschat import core
+        from crosschat.core import _refresh_heartbeat_entry
+
+        slept: list[float] = []
+
+        async def fake_sleep(seconds):
+            slept.append(seconds)
+
+        monkeypatch.setattr(core.asyncio, "sleep", fake_sleep)
+        kv = _FlakyKV({"velhari": _SIGNED}, fail_reads=99)
+        await _refresh_heartbeat_entry(kv, "velhari", attempts=3, delay=0.5)
+        assert slept == [0.5, 0.5]  # between tries, not after the last
+
+    @pytest.mark.asyncio
+    async def test_missing_key_is_not_retried_and_not_created(self):
+        from nats.js.errors import KeyNotFoundError
+
+        from crosschat.core import _refresh_heartbeat_entry
+
+        kv = _FlakyKV({}, fail_reads=99, error=KeyNotFoundError())
+        await _refresh_heartbeat_entry(kv, "velhari", attempts=3, delay=0)
+        assert kv.get_calls == 1
+        assert kv.put_calls == []
+
+    @pytest.mark.asyncio
+    async def test_unreadable_entry_is_not_overwritten(self):
+        from crosschat.core import _refresh_heartbeat_entry
+
+        kv = _FakeKV()
+        kv._store["velhari"] = b"not json"
+        await _refresh_heartbeat_entry(kv, "velhari", attempts=3, delay=0)
+        assert kv.put_calls == []
+        assert kv._store["velhari"] == b"not json"
+
+    @pytest.mark.asyncio
+    async def test_healthy_read_writes_once_without_waiting(self):
+        from crosschat.core import _refresh_heartbeat_entry
+
+        kv = _FlakyKV({"velhari": _SIGNED}, fail_reads=0)
+        await _refresh_heartbeat_entry(kv, "velhari", attempts=3, delay=60)
+        assert kv.get_calls == 1
+        assert len(kv.put_calls) == 1
+
+    def test_docstring_names_public_key(self):
+        from crosschat.core import _refresh_heartbeat_entry
+
+        assert "public_key" in _refresh_heartbeat_entry.__doc__
