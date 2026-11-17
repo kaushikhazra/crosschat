@@ -738,16 +738,107 @@ class TestMonitorLoop:
 
         js = _FakeJS(sub=sub)
         kv = _RaisingKV()
+
+        def boom(_line):
+            raise RuntimeError("emit failed")
+
         with pytest.raises(RuntimeError):
             await monitor_loop(
                 js,
                 kv,
                 "velhari",
-                emit=lambda _: None,
+                emit=boom,
                 max_iterations=1,
                 heartbeat_interval=0,
             )
         assert sub.unsubscribed is True
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_failure_does_not_stop_the_loop_and_is_retried(self):
+        # issue #3: a KV put that raises during a NATS outage must not end the listener.
+        class _RaisingKV(_FakeKV):
+            attempts = 0
+
+            async def put(self, key, value):
+                _RaisingKV.attempts += 1
+                raise RuntimeError("nats timeout")
+
+        sub = _FakeSub([])
+        await monitor_loop(
+            _FakeJS(sub=sub),
+            _RaisingKV(),
+            "velhari",
+            emit=lambda _: None,
+            max_iterations=3,
+            heartbeat_interval=0,
+            message_timeout=0.001,
+        )
+        assert _RaisingKV.attempts == 3  # retried every tick, never gave up
+        assert sub.unsubscribed is True
+
+    @pytest.mark.asyncio
+    async def test_next_msg_error_does_not_stop_the_loop(self):
+        class _DownSub(_FakeSub):
+            calls = 0
+
+            async def next_msg(self, timeout: float = 5.0):
+                _DownSub.calls += 1
+                raise ConnectionError("reconnecting")
+
+        sub = _DownSub([])
+        await monitor_loop(
+            _FakeJS(sub=sub),
+            _FakeKV(),
+            "velhari",
+            emit=lambda _: None,
+            max_iterations=3,
+            heartbeat_interval=3600,
+            message_timeout=0.001,
+        )
+        assert _DownSub.calls == 3
+
+    @pytest.mark.asyncio
+    async def test_ack_failure_does_not_stop_the_loop(self):
+        sub = _FakeSub([{"text": "a"}, {"text": "b"}])
+
+        async def bad_ack():
+            raise ConnectionError("down")
+
+        for m in sub._queue:
+            m.ack = bad_ack
+        emitted: list[str] = []
+        await monitor_loop(
+            _FakeJS(sub=sub),
+            _FakeKV(),
+            "velhari",
+            emit=emitted.append,
+            max_iterations=2,
+            heartbeat_interval=3600,
+            message_timeout=0.001,
+        )
+        assert len(emitted) == 2
+
+    @pytest.mark.asyncio
+    async def test_on_ready_fires_once_after_subscribing(self):
+        order: list[str] = []
+        js = _FakeJS(sub=_FakeSub([]))
+        orig = js.subscribe
+
+        async def spy(*a, **k):
+            order.append("subscribe")
+            return await orig(*a, **k)
+
+        js.subscribe = spy
+        await monitor_loop(
+            js,
+            _FakeKV(),
+            "velhari",
+            emit=lambda _: None,
+            max_iterations=2,
+            message_timeout=0.001,
+            on_ready=lambda: order.append("ready"),
+        )
+        assert order == ["subscribe", "ready"]
 
     @pytest.mark.asyncio
     async def test_handles_malformed_message_json(self):

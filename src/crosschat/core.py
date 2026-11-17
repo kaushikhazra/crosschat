@@ -41,6 +41,8 @@ STREAM_MAX_AGE = 1 * 86400  # 1 day
 REGISTRY_BUCKET = "crosschat-registry"
 REGISTRY_TTL = 5 * 60  # 5 minutes
 HEARTBEAT_INTERVAL = 60  # seconds
+CONNECT_ATTEMPT_TIMEOUT = 10.0  # seconds one first-connect attempt may take
+CONNECT_BACKOFF = (5, 10, 20, 40, 60)  # seconds between attempts; the last repeats
 
 
 class InfraNotReadyError(RuntimeError):
@@ -143,8 +145,10 @@ def build_envelope(source_project_id: str, dest_project_id: str, text: str) -> d
 
 async def connect_with_retry(
     url: str,
-    timeout: float = 30.0,
+    timeout: float | None = 30.0,
     connect_fn: Callable[..., Awaitable[Any]] | None = None,
+    attempt_timeout: float = CONNECT_ATTEMPT_TIMEOUT,
+    **connect_kwargs: Any,
 ) -> Any:
     """Connect to NATS with a bounded retry/backoff loop for the *initial* connect.
 
@@ -155,20 +159,32 @@ async def connect_with_retry(
     failure" vs "Wake contract").
     """
     connect_fn = connect_fn or nats.connect
-    deadline = time.monotonic() + timeout
+    # ``timeout=None`` retries forever — the persistent listener must not give up
+    # on a NATS host that is merely asleep.
+    deadline = float("inf") if timeout is None else time.monotonic() + timeout
     last_error: Exception | None = None
+    attempt = 0
     while time.monotonic() < deadline:
         try:
-            return await connect_fn(
-                servers=[url],
-                allow_reconnect=True,
-                max_reconnect_attempts=-1,
-                reconnect_time_wait=2,
+            # Each attempt is bounded and builds a fresh client: nats.py's own
+            # first-connect loop can wedge for good after a longer outage
+            # (measured: down 20 s, still stuck 60 s after NATS returned), so
+            # the retrying is done here.
+            return await asyncio.wait_for(
+                connect_fn(
+                    servers=[url],
+                    allow_reconnect=True,
+                    max_reconnect_attempts=-1,
+                    reconnect_time_wait=2,
+                    **connect_kwargs,
+                ),
+                timeout=attempt_timeout,
             )
         except Exception as e:
             last_error = e
-            logger.warning("NATS connection attempt failed: %s", e)
-            await asyncio.sleep(2)
+            logger.warning("NATS connection attempt failed: %r", e)
+            await asyncio.sleep(CONNECT_BACKOFF[min(attempt, len(CONNECT_BACKOFF) - 1)])
+            attempt += 1
     raise ConnectionError(f"NATS unavailable at {url} after {timeout}s: {last_error}")
 
 
@@ -443,6 +459,7 @@ async def monitor_loop(
     max_iterations: int | None = None,
     heartbeat_interval: float = HEARTBEAT_INTERVAL,
     message_timeout: float = 5.0,
+    on_ready: Callable[[], None] | None = None,
 ) -> None:
     """Persistent listener loop for crosschat-monitor.
 
@@ -462,6 +479,9 @@ async def monitor_loop(
         subject, durable=consumer_name(project_id), config=monitor_consumer_config()
     )
 
+    if on_ready is not None:
+        on_ready()
+
     last_heartbeat = time.monotonic()
     iterations = 0
     try:
@@ -471,6 +491,13 @@ async def monitor_loop(
                 msg = await sub.next_msg(timeout=message_timeout)
             except asyncio.TimeoutError:
                 msg = None
+            except Exception as e:
+                # NATS is down. nats.py's own reconnect and the durable consumer
+                # recover on their own; the loop's job is to still be here when
+                # they do. Pause, so a call that fails instantly is not a busy loop.
+                logger.warning("next_msg failed: %s", e)
+                msg = None
+                await asyncio.sleep(message_timeout)
 
             if msg is not None:
                 try:
@@ -478,13 +505,27 @@ async def monitor_loop(
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     data = {"raw": msg.data.decode(errors="replace")}
                 else:
-                    data["verification"] = await _verify_incoming(kv, data)
+                    try:
+                        data["verification"] = await _verify_incoming(kv, data)
+                    except Exception:
+                        data["verification"] = signing.UNSIGNED
                 emit("CROSSCHAT_MESSAGE " + json.dumps(data))
-                await msg.ack()
+                try:
+                    await msg.ack()
+                except Exception:
+                    # Unacked, so JetStream redelivers it after the outage.
+                    logger.warning("ack failed; message will be redelivered")
 
             now = time.monotonic()
             if now - last_heartbeat >= heartbeat_interval:
-                await _refresh_heartbeat_entry(kv, project_id)
-                last_heartbeat = now
+                try:
+                    await _refresh_heartbeat_entry(kv, project_id)
+                    last_heartbeat = now
+                except Exception as e:
+                    # Not updating last_heartbeat retries on the next tick.
+                    logger.warning("heartbeat refresh failed: %s", e)
     finally:
-        await sub.unsubscribe()
+        try:
+            await sub.unsubscribe()
+        except Exception:
+            pass

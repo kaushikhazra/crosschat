@@ -8,6 +8,7 @@ makes it testable directly, which those duplicated scripts never were.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 import pytest
@@ -277,15 +278,46 @@ class TestRunHandlersPrintWakeContract:
         assert "CROSSCHAT_SEND_FAIL" in capsys.readouterr().out
 
     @pytest.mark.asyncio
-    async def test_run_monitor_prints_connect_fail(self, monkeypatch, capsys):
-        async def fake_connect_with_retry(url):
-            raise ConnectionError("down")
+    async def test_run_monitor_never_gives_up_connecting(self, monkeypatch):
+        # issue #3: a listener must outlast a NATS host that is only asleep.
+        seen = {}
+
+        async def fake_connect_with_retry(url, **kwargs):
+            seen.update(kwargs)
+            raise asyncio.CancelledError()
 
         monkeypatch.setattr(
             crosstalk_cli, "connect_with_retry", fake_connect_with_retry
         )
-        await crosstalk_cli._run_monitor("velhari", "nats://x")
-        assert "NATS_CONNECT_FAIL" in capsys.readouterr().out
+        with pytest.raises(asyncio.CancelledError):
+            await crosstalk_cli._run_monitor("velhari", "nats://x")
+        assert seen["timeout"] is None
+        assert {"error_cb", "disconnected_cb", "reconnected_cb"} <= set(seen)
+
+    @pytest.mark.asyncio
+    async def test_run_monitor_survives_a_failing_drain(self, monkeypatch):
+        class _FakeJS:
+            async def key_value(self, bucket):
+                return "kv"
+
+        class _FakeNC:
+            def jetstream(self):
+                return _FakeJS()
+
+            async def drain(self):
+                raise RuntimeError("ConnectionReconnectingError")
+
+        async def fake_connect_with_retry(url, **kwargs):
+            return _FakeNC()
+
+        async def fake_monitor_loop(js, kv, project_id, emit, on_ready=None):
+            pass
+
+        monkeypatch.setattr(
+            crosstalk_cli, "connect_with_retry", fake_connect_with_retry
+        )
+        monkeypatch.setattr(crosstalk_cli, "monitor_loop", fake_monitor_loop)
+        await crosstalk_cli._run_monitor("velhari", "nats://x")  # must not raise
 
     @pytest.mark.asyncio
     async def test_run_monitor_invokes_monitor_loop(self, monkeypatch):
@@ -303,10 +335,10 @@ class TestRunHandlersPrintWakeContract:
 
         called = {}
 
-        async def fake_connect_with_retry(url):
+        async def fake_connect_with_retry(url, **kwargs):
             return _FakeNC()
 
-        async def fake_monitor_loop(js, kv, project_id, emit):
+        async def fake_monitor_loop(js, kv, project_id, emit, on_ready=None):
             called["args"] = (kv, project_id)
             emit("CROSSCHAT_MESSAGE {}")
 

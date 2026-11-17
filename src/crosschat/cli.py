@@ -13,6 +13,8 @@ import argparse
 import asyncio
 import json
 
+from nats.js.errors import BucketNotFoundError, NotFoundError
+
 from crosschat.core import (
     DestinationNotRegisteredError,
     InfraNotReadyError,
@@ -133,19 +135,64 @@ async def _run_send(
 
 
 async def _run_monitor(project_id: str, nats_url: str) -> None:
-    try:
-        nc = await connect_with_retry(nats_url)
-    except ConnectionError as e:
-        print(f"NATS_CONNECT_FAIL {e}", flush=True)
-        return
+    def emit(line: str) -> None:
+        print(line, flush=True)
+
+    # One state line per change, never per attempt. nats.py calls these once per
+    # drop and once per recovery.
+    async def on_disconnect() -> None:
+        emit("CROSSCHAT_DISCONNECTED")
+
+    async def on_reconnect() -> None:
+        emit(f"CROSSCHAT_REGISTERED {project_id}")
+
+    # nats.py retries a first connect internally, reporting each failed attempt
+    # through error_cb; announce only the first, and only before ever connecting.
+    state = {"connected": False, "waited": False}
+
+    async def on_error(_e: Exception) -> None:
+        if not state["connected"] and not state["waited"]:
+            state["waited"] = True
+            emit("CROSSCHAT_WAITING")
+
+    # The listener never gives up on a NATS host that is only asleep.
+    nc = await connect_with_retry(
+        nats_url,
+        timeout=None,
+        error_cb=on_error,
+        disconnected_cb=on_disconnect,
+        reconnected_cb=on_reconnect,
+    )
+    state["connected"] = True
     try:
         js = nc.jetstream()
-        kv = await js.key_value(REGISTRY_BUCKET)
+        # NATS can be back before the stream and bucket are (a fresh server, or
+        # one still loading its store). Keep waiting rather than exit; say so only
+        # if the listener has not already announced that it is waiting.
+        told = state["waited"]
+        while True:
+            try:
+                kv = await js.key_value(REGISTRY_BUCKET)
+                break
+            except (BucketNotFoundError, NotFoundError) as e:
+                if not told:
+                    told = True
+                    emit(f"CROSSCHAT_INIT_REQUIRED {e}")
+                await asyncio.sleep(2)
         await monitor_loop(
-            js, kv, project_id, emit=lambda line: print(line, flush=True)
+            js,
+            kv,
+            project_id,
+            emit=emit,
+            on_ready=lambda: emit(f"CROSSCHAT_REGISTERED {project_id}"),
         )
     finally:
-        await nc.drain()
+        # A drain on a connection that is mid-reconnect raises; that must not
+        # turn into exit 1 over the real error (or a clean cancel).
+        try:
+            await nc.drain()
+        except Exception:
+            pass
 
 
 async def _run_list(nats_url: str) -> None:
