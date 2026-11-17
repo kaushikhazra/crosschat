@@ -24,7 +24,7 @@ from typing import Any, Awaitable, Callable
 
 import nats
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
-from nats.js.errors import BadRequestError, NotFoundError
+from nats.js.errors import BadRequestError, KeyNotFoundError, NotFoundError
 
 from crosschat import signing
 
@@ -41,6 +41,8 @@ STREAM_MAX_AGE = 1 * 86400  # 1 day
 REGISTRY_BUCKET = "crosschat-registry"
 REGISTRY_TTL = 5 * 60  # 5 minutes
 HEARTBEAT_INTERVAL = 60  # seconds
+HEARTBEAT_READ_ATTEMPTS = 3  # reads of the registry entry before giving up
+HEARTBEAT_READ_DELAY = 1.0  # seconds between those reads
 CONNECT_ATTEMPT_TIMEOUT = 10.0  # seconds one first-connect attempt may take
 CONNECT_BACKOFF = (5, 10, 20, 40, 60)  # seconds between attempts; the last repeats
 
@@ -373,18 +375,42 @@ async def deregister_project(kv: Any, project_id: str) -> None:
         pass
 
 
-async def _refresh_heartbeat_entry(kv: Any, project_id: str) -> None:
-    """Rewrite project_id's entry with an updated last_heartbeat, preserving
-    the other fields already stored (project_name, path, registered_at)."""
-    entry: dict = {}
-    try:
-        raw = await kv.get(project_id)
-        if raw is not None and raw.value is not None:
+async def _refresh_heartbeat_entry(
+    kv: Any,
+    project_id: str,
+    attempts: int = HEARTBEAT_READ_ATTEMPTS,
+    delay: float = HEARTBEAT_READ_DELAY,
+) -> None:
+    """Set last_heartbeat on project_id's entry, keeping every other field
+    already stored: project_name, path, registered_at and public_key.
+
+    The entry is written back only when it was actually read. The read is tried
+    up to ``attempts`` times with ``delay`` seconds between tries, because a NATS
+    blip is transient. If every try fails, nothing is written and the next
+    heartbeat tries again: a stale last_heartbeat is harmless, a rewritten entry
+    that lost its public_key makes every message from this project verify as
+    ``no-key`` (issue #2). A missing key is not transient, so it is neither
+    retried nor created here; registering is what creates an entry.
+    """
+    for attempt in range(attempts):
+        try:
+            raw = await kv.get(project_id)
+            if raw is None or raw.value is None:
+                return
             entry = json.loads(raw.value.decode())
-    except Exception:
-        entry = {}
-    entry["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
-    await kv.put(project_id, json.dumps(entry).encode())
+            if not isinstance(entry, dict):
+                raise ValueError("registry entry is not an object")
+        except KeyNotFoundError:
+            return
+        except Exception as e:
+            logger.warning("heartbeat read %d/%d failed: %r", attempt + 1, attempts, e)
+            if attempt + 1 < attempts:
+                await asyncio.sleep(delay)
+            continue
+        entry["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
+        await kv.put(project_id, json.dumps(entry).encode())
+        return
+    logger.warning("heartbeat not written for %s: entry unreadable", project_id)
 
 
 # ---------------------------------------------------------------------------
