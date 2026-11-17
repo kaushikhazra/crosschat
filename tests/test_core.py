@@ -273,7 +273,8 @@ class TestConnectWithRetry:
         assert calls[0]["allow_reconnect"] is True
 
     @pytest.mark.asyncio
-    async def test_retries_then_succeeds(self):
+    async def test_retries_then_succeeds(self, monkeypatch):
+        monkeypatch.setattr("crosschat.core.CONNECT_BACKOFF", (0.001,))
         attempts = {"n": 0}
 
         async def flaky_connect(**kwargs):
@@ -289,12 +290,51 @@ class TestConnectWithRetry:
         assert attempts["n"] == 3
 
     @pytest.mark.asyncio
-    async def test_raises_connection_error_after_timeout(self):
+    async def test_raises_connection_error_after_timeout(self, monkeypatch):
+        monkeypatch.setattr("crosschat.core.CONNECT_BACKOFF", (0.001,))
+
         async def always_fails(**kwargs):
             raise RuntimeError("nats down")
 
         with pytest.raises(ConnectionError):
             await connect_with_retry("nats://x", timeout=0.01, connect_fn=always_fails)
+
+    @pytest.mark.asyncio
+    async def test_a_wedged_attempt_is_cut_off_and_retried_fresh(self, monkeypatch):
+        # nats.py's own first-connect loop can hang for good; each attempt is bounded.
+        monkeypatch.setattr("crosschat.core.CONNECT_BACKOFF", (0.001,))
+        attempts = {"n": 0}
+
+        async def wedges_once(**kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                await asyncio.sleep(3600)
+            return "CONNECTED"
+
+        result = await connect_with_retry(
+            "nats://x", timeout=None, connect_fn=wedges_once, attempt_timeout=0.05
+        )
+        assert result == "CONNECTED"
+        assert attempts["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_backs_off_5_10_20_40_60_then_holds_at_60(self, monkeypatch):
+        slept: list[float] = []
+
+        async def fake_sleep(seconds):
+            slept.append(seconds)
+
+        monkeypatch.setattr("crosschat.core.asyncio.sleep", fake_sleep)
+        attempts = {"n": 0}
+
+        async def fails_seven_times(**kwargs):
+            attempts["n"] += 1
+            if attempts["n"] <= 7:
+                raise RuntimeError("down")
+            return "CONNECTED"
+
+        await connect_with_retry("nats://x", timeout=None, connect_fn=fails_seven_times)
+        assert slept == [5, 10, 20, 40, 60, 60, 60]
 
 
 # ---------------------------------------------------------------------------
